@@ -7,6 +7,8 @@ import ssl
 import sys
 import urllib
 
+import torch.nn.functional as F
+
 import dgl
 import dgl.function as fn
 import numpy as np
@@ -261,13 +263,13 @@ class GraphDataset(pl.LightningDataModule):
         self.cache_f_name = osp.join(
             cache_dir,
             f"{self.name}_{n_hops}hop_selfloop={cfg.add_self_loop}_bidirected={cfg.to_bidirected}_split="
-            f"{self.split_index}.pt",
+            f"{self.split_index}_stack_features={cfg.stack_features}.pt",
         )
 
         self.dist_f_name = osp.join(
             cache_dir,
             f"{self.name}_{n_hops}hop_selfloop={cfg.add_self_loop}_bidirected={cfg.to_bidirected}_split="
-            f"{self.split_index}_{cfg.feat_chn}_entropy={cfg.entropy}_dist.pt",
+            f"{self.split_index}_{cfg.feat_chn}_entropy={cfg.entropy}_stack_features={cfg.stack_features}_dist.pt",
         )
 
         self.gidtype = self.g.idtype
@@ -278,7 +280,7 @@ class GraphDataset(pl.LightningDataModule):
             self.unmasked_pred,
             self.dist,
         ) = self.prepare_prop_features_logits_and_dist_features(
-            self.g, self.feat, n_hops=cfg.n_hops
+            self.g, self.feat, n_hops=cfg.n_hops, stack_features=cfg.stack_features
         )
         # Remove the graph, as GraphAny doesn't use it in training
         del self.g
@@ -454,9 +456,33 @@ class GraphDataset(pl.LightningDataModule):
             visible_nodes,
             bootstrap=sample,
         )
-        return {c: logits.to(device) for c, logits in pred_logits.items()}
 
-    def prepare_prop_features_logits_and_dist_features(self, g, input_feats, n_hops):
+        pred_dict = {c: logits.to(device) for c, logits in pred_logits.items()}
+
+        acc_dict = {}
+        
+        ## Compute the training accuracies
+        for c, logits in pred_dict.items():
+            preds = logits[visible_nodes]
+            preds = torch.argmax(preds, dim=1)
+            acc = (preds == self.label[visible_nodes]).float().mean()
+            acc_dict[c] = acc
+
+        ce_loss_dict = {}
+        for c, logits in pred_dict.items():
+            loss = torch.nn.functional.cross_entropy(logits[visible_nodes], self.label[visible_nodes])
+            ce_loss_dict[c] = loss
+
+        l2_loss_dict = {}
+        for c, logits in pred_dict.items():
+            l2_loss = torch.nn.functional.mse_loss(logits[visible_nodes], F.one_hot(self.label[visible_nodes], self.num_class).float())
+            l2_loss_dict[c] = l2_loss
+
+        preds_dict = {'preds': pred_dict, 'l2_loss': l2_loss_dict, 'ce_loss': ce_loss_dict, 'acc': acc_dict}
+
+        return preds_dict
+
+    def prepare_prop_features_logits_and_dist_features(self, g, input_feats, n_hops, stack_features=False):
         # Calculate Low-pass features containing AX, A^2X and High-pass features
         # (I-A)X, and (I-A)^2X
         if not os.path.exists(self.cache_f_name):
@@ -489,6 +515,12 @@ class GraphDataset(pl.LightningDataModule):
                 hp_feat_dict = {f"H{l + 1}": x for l, x in enumerate(HP)}
 
                 features = {"X": input_feats, **lp_feat_dict, **hp_feat_dict}
+
+                if stack_features:
+                    # Stack all the features
+                    features_stacked = torch.cat(list(features.values()), dim=1)
+                    features = {"STK": features_stacked, **features}
+
                 unmasked_pred = self.compute_channel_logits(
                     features,
                     self.train_indices,
@@ -506,7 +538,7 @@ class GraphDataset(pl.LightningDataModule):
             ):
                 # y_feat: n_nodes, n_channels, n_labels
                 y_feat = np.stack(
-                    [unmasked_pred[c].cpu().numpy() for c in self.cfg.feat_channels],
+                    [unmasked_pred['preds'][c].cpu().numpy() for c in self.cfg.feat_channels],
                     axis=1,
                 )
                 # Conditional gaussian probability

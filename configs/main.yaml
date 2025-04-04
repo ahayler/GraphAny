@@ -22,7 +22,7 @@ res_file: ${dirs.output}seed${seed}_results.json
 
 # ! Experiments
 uid: null # To be generated in the main program
-seed: 0
+seed: 4
 eval_freq: 5
 
 # ! Wandb settings

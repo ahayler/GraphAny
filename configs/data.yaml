@@ -3,6 +3,7 @@
 # ! Dataset Preprocessing
 preprocess_device: gpu # Set to cpu if your GPU memory is below 32GB
 add_self_loop: false
+stack_features: false
 to_bidirected: true
 n_hops: 2
 
@@ -10,7 +11,8 @@ n_hops: 2
 dataset: Debug
 train_datasets: ${oc.select:_dataset_lookup.${dataset}.train,${dataset}}
 eval_datasets: ${oc.select:_dataset_lookup.${dataset}.eval,${dataset}}
-_trans_datasets: [ Arxiv, Product, Cora, Wisconsin ] # Used when identifying heldout datasets.
+_trans_datasets: [ Arxiv ]
+#[ Arxiv, Product, Cora, Wisconsin ] # Used when identifying heldout datasets.
 
 _all_datasets: [
   Arxiv,
@@ -50,6 +52,9 @@ _all_datasets: [
 ]
 
 _dataset_lookup:
+  GraphNone:
+    train: []
+    eval: ${_all_datasets}
   Debug:
     train: [ Wisconsin ]
     eval: [ Texas ]
@@ -65,6 +70,9 @@ _dataset_lookup:
   ProdXAll:
     train: [ Product ]
     eval: ${_all_datasets}
+  ArxivOnly:
+    train: []
+    eval: [ Arxiv ]
 
   # Train on Arxiv, inference on Cora and Citeseer
   CoraCiteInference:

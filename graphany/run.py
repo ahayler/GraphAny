@@ -14,6 +14,7 @@ import wandb
 import numpy as np
 import torchmetrics
 from rich.pretty import pretty_repr
+from collections import defaultdict
 
 mean = lambda input: np.round(np.mean(input).item(), 2)
 
@@ -116,12 +117,38 @@ class InductiveNodeClassification(pl.LightningModule):
             for metric in metrics_dict.values():
                 metric.to(self.device)
 
+    def compute_ensemble_weights(self, logit_dict, temperature=1.0):
+        """
+        Compute the ensemble weights for the given logit dictionary.
+
+        Args:
+            logit_dict (dict): A dictionary of logits for each channel (key: channel, value: scalar logits e.g. the accuracy on the training set).
+            temperature (float): The temperature for the softmax function.
+
+        Returns:
+            torch.Tensor: The ensemble weights.
+        """
+        # Softmax the logits
+        logits = torch.stack([logit_dict[c] for c in self.cfg.pred_channels], dim=0) # make sure that we only use the pred_channels
+        logits = torch.nn.functional.softmax(logits / temperature, dim=0)
+        weight_dict = {c: logits[i] for i, c in enumerate(self.cfg.pred_channels)}
+        return weight_dict
+
     def predict(self, ds, nodes, input, is_training=False):
         # Use preprocessed distance during evaluation
         dist = ds.dist if not is_training else None
         dist = dist.to(nodes.device)[nodes] if dist is not None else dist
+
+        accs = input['acc']
+        # TODO: Try with l2_loss and ce_loss work any better?
+        l2_loss = input['l2_loss']
+        ce_loss = input['ce_loss']
+
+        ensemble_weights = self.compute_ensemble_weights(accs, temperature=0.025)
+        #ensemble_weights = self.compute_ensemble_weights(defaultdict(lambda: torch.tensor(0))) # Gives me constant weights
+        #ensemble_weights = None
         preds, attn = self.gnn_model(
-            {c: chn_pred[nodes] for c, chn_pred in input.items()}, dist=dist
+            {c: chn_pred[nodes] for c, chn_pred in input['preds'].items()}, dist=dist, ensemble_weights=ensemble_weights, softmax_predictions=False
         )
         self.attn_dict.update(
             {

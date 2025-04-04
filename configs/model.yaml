@@ -9,6 +9,8 @@ prev_ckpt: null # Path of pre-trained checkpoint, null for training from scratch
 # GraphAny utilizes the _interactions between predictions_ as features of an MLP to derive inductive attention scores. We dub these predictions of LinearGNNs that serves as feature as "**_feature channels_**", defined as `feat_chn` in the config file. Then the predictions of LinearGNNs are combined using attention scores, these LinearGNN predictions are called "**_prediction channels_**", defined as `pred_chn` in the config file.
 feat_chn: X+L1+L2+H1+H2 # X=Linear, L1=LinearSGC1, L2=LinearSGC2, H1=LinearHGC1, H2=LinearHGC2
 pred_chn: X+L1+L2 # We mask the H1 and H2 Channel for faster convergence.
+#feat_chn: STK
+#pred_chn: STK
 feat_channels: ${eval:'"${feat_chn}".split("+")'}
 pred_channels: ${eval:'"${pred_chn}".split("+")'}
 

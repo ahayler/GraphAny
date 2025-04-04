@@ -50,19 +50,34 @@ class GraphAny(nn.Module):
         dist = torch.from_numpy(dist).to(y_feat.device)
         return dist
 
-    def forward(self, logit_dict, dist=None, **kwargs):
+    def forward(self, logit_dict, ensemble_weights=None, dist=None, softmax_predictions=False, pred_softmax_temperature=1, **kwargs):
         # logit_dict: key: channel, value: prediction of shape (batch_size, n_classes)
         y_feat = torch.stack([logit_dict[c] for c in self.feat_channels], dim=1)
         y_pred = torch.stack([logit_dict[c] for c in self.pred_channels], dim=1)
+
+        if softmax_predictions:
+            y_pred = th.softmax(y_pred / pred_softmax_temperature, dim=-1)
 
         # ! Fuse y_pred with attentions
         dist = self.compute_dist(y_feat) if dist is None else dist
         # Project pairwise differences to the attention scores (batch_size, n_channels)
         attention = self.mlp(dist)
         attention = th.softmax(attention / self.att_temperature, dim=-1)
-        fused_y = th.sum(
-            rearrange(attention, "n n_channels -> n n_channels 1") * y_pred, dim=1
-        )  # Sum over channels, resulting in (batch_size, n_classes)
+
+        # Fuse y_pred with ensemble weights
+        if ensemble_weights is not None:
+            weights = torch.tensor(list(ensemble_weights.values()))
+            fused_y = th.sum(
+                rearrange(weights, "n_channels -> 1 n_channels 1") * y_pred, 
+                dim=1
+            )
+        else:
+            # Fuse y_pred with attentions (if we give no ensemble weights)
+            fused_y = th.sum(
+                rearrange(attention, "n n_channels -> n n_channels 1") * y_pred, dim=1
+            )  # Sum over channels, resulting in (batch_size, n_classes)
+
+
         return fused_y, attention.mean(0).tolist()
 
 
