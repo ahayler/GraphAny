@@ -1,5 +1,7 @@
 import pytorch_lightning as pl
 import rootutils
+import statistics
+from collections import defaultdict
 
 root = rootutils.setup_root(__file__, dotenv=True, pythonpath=True, cwd=False)
 from graphany.utils import logger, timer
@@ -14,7 +16,6 @@ import wandb
 import numpy as np
 import torchmetrics
 from rich.pretty import pretty_repr
-from collections import defaultdict
 
 mean = lambda input: np.round(np.mean(input).item(), 2)
 
@@ -144,9 +145,9 @@ class InductiveNodeClassification(pl.LightningModule):
         l2_loss = input['l2_loss']
         ce_loss = input['ce_loss']
 
-        ensemble_weights = self.compute_ensemble_weights(accs, temperature=0.025)
+        #ensemble_weights = self.compute_ensemble_weights(accs, temperature=0.025)
         #ensemble_weights = self.compute_ensemble_weights(defaultdict(lambda: torch.tensor(0))) # Gives me constant weights
-        #ensemble_weights = None
+        ensemble_weights = None
         preds, attn = self.gnn_model(
             {c: chn_pred[nodes] for c, chn_pred in input['preds'].items()}, dist=dist, ensemble_weights=ensemble_weights, softmax_predictions=False
         )
@@ -252,69 +253,117 @@ class InductiveNodeClassification(pl.LightningModule):
 @timer()
 @hydra.main(config_path=f"{root}/configs", config_name="main", version_base=None)
 def main(cfg: DictConfig):
-    cfg, logger = init_experiment(cfg)
-    # Define the default step metric for all metrics
-    wandb.define_metric("*", step_metric="epoch")
-    if torch.cuda.is_available() and cfg.preprocess_device == "gpu":
-        preprocess_device = torch.device("cuda")
-    else:
-        preprocess_device = torch.device("cpu")
+    # List of seeds to run
+    seeds = [0, 0]  # You can adjust these seeds as needed
+    all_results = defaultdict(list)
+    
+    for seed in seeds:
+        logger.critical(f"Running with seed {seed}")
+        
+        # Set all random seeds comprehensively
+        pl.seed_everything(seed, workers=True)
+        
+        # # Force CUDA determinism
+        # torch.backends.cudnn.deterministic = True
+        # torch.backends.cudnn.benchmark = False
+        
+        # Initialize experiment for this seed
+        cfg.seed = seed
+        seed_cfg, seed_logger = init_experiment(cfg)
 
-    def construct_ds_dict(datasets):
-        datasets = [datasets] if isinstance(datasets, str) else datasets
-        ds_dict = {
-            dataset: GraphDataset(
-                cfg,
-                dataset,
-                cfg.dirs.data_cache,
-                cfg.train_batch_size,
-                cfg.val_test_batch_size,
-                cfg.n_hops,
-                preprocess_device,
-            )
-            for dataset in datasets
-        }
-        return ds_dict
+        wandb.define_metric("*", step_metric="epoch")
+        
+        if torch.cuda.is_available() and cfg.preprocess_device == "gpu":
+            preprocess_device = torch.device("cuda")
+        else:
+            preprocess_device = torch.device("cpu")
 
-    train_ds_dict = construct_ds_dict(cfg.train_datasets)
-    eval_ds_dict = construct_ds_dict(cfg.eval_datasets)
+        def construct_ds_dict(datasets):
+            datasets = [datasets] if isinstance(datasets, str) else datasets
+            ds_dict = {
+                dataset: GraphDataset(
+                    seed_cfg,
+                    dataset,
+                    seed_cfg.dirs.data_cache,
+                    seed_cfg.train_batch_size,
+                    seed_cfg.val_test_batch_size,
+                    seed_cfg.n_hops,
+                    preprocess_device,
+                )
+                for dataset in datasets
+            }
+            return ds_dict
 
-    combined_dataset = CombinedDataset(train_ds_dict, eval_ds_dict, cfg)
-
-    model = InductiveNodeClassification(cfg, combined_dataset, cfg.get("prev_ckpt"))
-    # Set up the checkpoint callback to save only at the end of training
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(
-        dirpath=cfg.dirs.output,  # specify where to save
-        filename="final_checkpoint.pt",  # set a filename
-        save_top_k=0,  # do not save based on metric, just save last
-        save_last=True,  # ensures only the last checkpoint is kept
-        save_on_train_epoch_end=True,  # save at the end of training epoch
-    )
-    trainer = pl.Trainer(
-        max_epochs=cfg.total_steps,
-        callbacks=[checkpoint_callback],
-        limit_train_batches=cfg.limit_train_batches,
-        check_val_every_n_epoch=cfg.eval_freq,
-        logger=logger,
-        accelerator="gpu" if torch.cuda.is_available() and cfg.gpus > 0 else "cpu",
-        default_root_dir=cfg.dirs.lightning_root,
-    )
-    dataloaders = {
-        "train": combined_dataset.train_dataloader(),
-        "val": combined_dataset.val_dataloader(),
-        "test": combined_dataset.test_dataloader(),
-    }
-    if cfg.total_steps > 0:
-        trainer.fit(
-            model,
-            train_dataloaders=dataloaders["train"],
-            val_dataloaders=dataloaders["val"],
+        train_ds_dict = construct_ds_dict(cfg.train_datasets)
+        eval_ds_dict = construct_ds_dict(cfg.eval_datasets)
+        combined_dataset = CombinedDataset(train_ds_dict, eval_ds_dict, seed_cfg)
+        
+        model = InductiveNodeClassification(seed_cfg, combined_dataset, seed_cfg.get("prev_ckpt"))
+        checkpoint_callback = pl.callbacks.ModelCheckpoint(
+            dirpath=seed_cfg.dirs.output,
+            filename=f"seed_{seed}_final_checkpoint.pt",
+            save_top_k=0,
+            save_last=True,
+            save_on_train_epoch_end=True,
         )
-    trainer.validate(model, dataloaders=dataloaders["val"])
-    trainer.test(model, dataloaders=dataloaders["test"])
-    final_results = model.res_dict
-    logger.critical(pretty_repr(final_results))
-    logger.wandb_summary_update(final_results, finish_wandb=True)
+        
+        trainer = pl.Trainer(
+            max_epochs=seed_cfg.total_steps,
+            callbacks=[checkpoint_callback],
+            limit_train_batches=seed_cfg.limit_train_batches,
+            check_val_every_n_epoch=seed_cfg.eval_freq,
+            logger=seed_logger,
+            accelerator="gpu" if torch.cuda.is_available() and seed_cfg.gpus > 0 else "cpu",
+            default_root_dir=seed_cfg.dirs.lightning_root,
+            deterministic=True,
+        )
+        
+        dataloaders = {
+            "train": combined_dataset.train_dataloader(),
+            "val": combined_dataset.val_dataloader(),
+            "test": combined_dataset.test_dataloader(),
+        }
+        
+        if seed_cfg.total_steps > 0:
+            trainer.fit(
+                model,
+                train_dataloaders=dataloaders["train"],
+                val_dataloaders=dataloaders["val"],
+            )
+        trainer.validate(model, dataloaders=dataloaders["val"])
+        trainer.test(model, dataloaders=dataloaders["test"])
+        
+        # Store results for this seed
+        for metric, value in model.res_dict.items():
+            all_results[metric].append(value)
+        
+        # Clean up for next seed
+        wandb.finish()
+    
+    # Compute statistics across seeds
+    final_stats = {}
+    for metric, values in all_results.items():
+        mean_value = statistics.mean(values)
+        if np.isnan(mean_value) or len(values) < 2:
+            std_error = float('nan')
+        else:
+            std_error = statistics.stdev(values)
+        final_stats[f"{metric}_mean"] = round(mean_value, 2)
+        final_stats[f"{metric}_stderr"] = round(std_error, 2)
+    
+    # Log final statistics
+    logger.critical("Final results across all seeds:")
+    logger.critical(pretty_repr(final_stats))
+    
+    # Create a formatted string for each metric
+    formatted_results = {}
+    for metric in all_results.keys():
+        mean = final_stats[f"{metric}_mean"]
+        stderr = final_stats[f"{metric}_stderr"]
+        formatted_results[metric] = f"{mean:.2f} ± {stderr:.2f}"
+    
+    logger.critical("\nFormatted results (mean ± stderr):")
+    logger.critical(pretty_repr(formatted_results))
 
 
 if __name__ == "__main__":

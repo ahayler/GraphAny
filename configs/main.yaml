@@ -22,8 +22,8 @@ res_file: ${dirs.output}seed${seed}_results.json
 
 # ! Experiments
 uid: null # To be generated in the main program
-seed: 4
-eval_freq: 5
+seed: 42
+eval_freq: 100 # was 5
 
 # ! Wandb settings
 project: GraphAny
