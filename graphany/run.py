@@ -145,9 +145,9 @@ class InductiveNodeClassification(pl.LightningModule):
         l2_loss = input['l2_loss']
         ce_loss = input['ce_loss']
 
-        #ensemble_weights = self.compute_ensemble_weights(accs, temperature=0.025)
+        ensemble_weights = self.compute_ensemble_weights(accs, temperature=0.025)
         #ensemble_weights = self.compute_ensemble_weights(defaultdict(lambda: torch.tensor(0))) # Gives me constant weights
-        ensemble_weights = None
+        #ensemble_weights = None
         preds, attn = self.gnn_model(
             {c: chn_pred[nodes] for c, chn_pred in input['preds'].items()}, dist=dist, ensemble_weights=ensemble_weights, softmax_predictions=False
         )
@@ -253,8 +253,37 @@ class InductiveNodeClassification(pl.LightningModule):
 @timer()
 @hydra.main(config_path=f"{root}/configs", config_name="main", version_base=None)
 def main(cfg: DictConfig):
+
+    def construct_ds_dict(datasets):
+        datasets = [datasets] if isinstance(datasets, str) else datasets
+        ds_dict = {
+            dataset: GraphDataset(
+                seed_cfg,
+                dataset,
+                seed_cfg.dirs.data_cache,
+                seed_cfg.train_batch_size,
+                seed_cfg.val_test_batch_size,
+                seed_cfg.n_hops,
+                preprocess_device,
+            )
+            for dataset in datasets
+        }
+        return ds_dict
+    
+    def cleanup_memory(model, trainer, combined_dataset, train_ds_dict, eval_ds_dict):
+
+        del model
+        del trainer
+        del combined_dataset
+        del train_ds_dict
+        del eval_ds_dict
+        torch.cuda.empty_cache()
+        import gc
+        gc.collect()
+
+
     # List of seeds to run
-    seeds = [0, 0]  # You can adjust these seeds as needed
+    seeds = [0]  # You can adjust these seeds as needed
     all_results = defaultdict(list)
     
     for seed in seeds:
@@ -262,10 +291,6 @@ def main(cfg: DictConfig):
         
         # Set all random seeds comprehensively
         pl.seed_everything(seed, workers=True)
-        
-        # # Force CUDA determinism
-        # torch.backends.cudnn.deterministic = True
-        # torch.backends.cudnn.benchmark = False
         
         # Initialize experiment for this seed
         cfg.seed = seed
@@ -277,22 +302,6 @@ def main(cfg: DictConfig):
             preprocess_device = torch.device("cuda")
         else:
             preprocess_device = torch.device("cpu")
-
-        def construct_ds_dict(datasets):
-            datasets = [datasets] if isinstance(datasets, str) else datasets
-            ds_dict = {
-                dataset: GraphDataset(
-                    seed_cfg,
-                    dataset,
-                    seed_cfg.dirs.data_cache,
-                    seed_cfg.train_batch_size,
-                    seed_cfg.val_test_batch_size,
-                    seed_cfg.n_hops,
-                    preprocess_device,
-                )
-                for dataset in datasets
-            }
-            return ds_dict
 
         train_ds_dict = construct_ds_dict(cfg.train_datasets)
         eval_ds_dict = construct_ds_dict(cfg.eval_datasets)
@@ -339,6 +348,9 @@ def main(cfg: DictConfig):
         
         # Clean up for next seed
         wandb.finish()
+
+        cleanup_memory(model, trainer, combined_dataset, train_ds_dict, eval_ds_dict)
+        
     
     # Compute statistics across seeds
     final_stats = {}
